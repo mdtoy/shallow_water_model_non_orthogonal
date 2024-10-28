@@ -1,0 +1,229 @@
+module step
+
+!-----------------------------------------------------------------
+!   This module updates the diagnostic variables and then time-
+!   steps the prognostic variables.
+!   Euler forward is used for the first time step, followed by
+!   Adams-Bashforth 2nd order for the second time step, and
+!   subsequently by Adams-Bashforth 3rd order time stepping.
+!   The "traditional" HPGF horizontal discretization is used.
+!-----------------------------------------------------------------
+
+use kinds
+use physical_parameters
+use model_parameters
+use prognostics
+use momentum_tendency
+
+implicit none
+save
+
+
+integer :: n3,  &                  ! index for time step n values
+                                   ! i.e. previous time step
+                                   
+           n4                      ! index for time step n+1 values
+                                   ! i.e. current time step
+
+integer :: n3_f, n2_f, n1_f        ! index for {n, n-1, n-2} tendencies
+
+real (kind = dbl_kind), dimension(im,jm) ::                          &
+           u2_cov_u1,         &  ! u2_cov interpolated to u1-points
+           u1_cov_u2             ! u1_cov interpolated to u2-points
+
+
+
+contains
+
+
+!======================================================================
+! BEGINNING OF UPDATE_DIAGNOSTICS
+!======================================================================
+
+subroutine update_diagnostics ( tau, w1, w2, w3 )
+
+!----------------------------------------------------------------------
+! PURPOSE:
+!   Updates diagnostic variables and calls subroutines to calculate
+!   tendencies of prognostic variables in preparation for
+!   time-stepping the prognostic variables.
+!----------------------------------------------------------------------
+
+implicit none
+
+!-------------------------------------------------------------------
+! INTENT IN 
+!-------------------------------------------------------------------
+real (kind = dbl_kind), intent(in) :: tau         ! time in hours
+real (kind = dbl_kind), intent(in) :: w1, w2, w3  ! Time stepping
+                                                  ! weights
+
+!-------------------------------------------------------------------
+! LOCAL
+!-------------------------------------------------------------------
+
+!
+! Declare mass flux variables to be used in the "3rd-order" Takacs
+! advection schemes for continuity and theta advection
+!
+real (kind = dbl_kind), dimension(im,jm) ::                          &
+           F_u1,          &      ! Mass flux in u1-direction
+                                 ! (colocated with u1-points)
+           F_u2                  ! Mass flux in u2-direction
+                                 ! (colocated with u2-points)
+
+real (kind = dbl_kind), dimension(im,jm) ::                          &
+           sqrt_G_h_star_u1,  &  ! Mass interpolated to u1-points
+           sqrt_G_h_star_u2      ! Mass interpolated to u2-points
+
+real (kind = dbl_kind), dimension(im,jm) ::                          &
+           G_cov_wt_u1_nw, G_cov_wt_u1_ne,   &  ! variables for calculating
+           G_cov_wt_u1_sw, G_cov_wt_u1_se,   &  ! interpolated g_cov and
+           G_cov_wt_u2_nw, G_cov_wt_u2_ne,   &  ! g_cont
+           G_cov_wt_u2_sw, G_cov_wt_u2_se,   &
+           temp                  ! working variable
+
+integer :: i,j
+
+
+
+
+
+! Calculate height of free surface
+h_star(:,:) = sqrt_G_h_star(:,:,n4)*inv_sqrt_G_h(:,:)
+h(:,:) = hs(:,:) + h_star(:,:)
+
+
+
+! Diagnose averaged covariant velocities and the contravariant velocities
+
+! First, calculate masses interpolated to velocity points
+sqrt_G_h_star_u1(:,:) = p5*(sqrt_G_h_star(:,:,n4)+sqrt_G_h_star(im1(:),:,n4))
+sqrt_G_h_star_u2(:,:) = p5*(sqrt_G_h_star(:,:,n4)+sqrt_G_h_star(:,jm1(:),n4))
+
+! Calculate mass-weightings for interpolated covariant velocities
+temp(:,:) = c1 / sqrt_G_h_star_u1(:,:)**0.5
+G_cov_wt_u1_nw(:,:) = temp(:,:) * sqrt_G_h_star_u2(im1(:),jp1(:))**0.5
+G_cov_wt_u1_ne(:,:) = temp(:,:) * sqrt_G_h_star_u2(:,jp1(:))**0.5
+G_cov_wt_u1_sw(:,:) = temp(:,:) * sqrt_G_h_star_u2(im1(:),:)**0.5
+G_cov_wt_u1_se(:,:) = temp(:,:) * sqrt_G_h_star_u2(:,:)**0.5
+temp(:,:) = c1 / sqrt_G_h_star_u2(:,:)**0.5
+G_cov_wt_u2_nw(:,:) = temp(:,:) * sqrt_G_h_star_u1(:,:)**0.5
+G_cov_wt_u2_ne(:,:) = temp(:,:) * sqrt_G_h_star_u1(ip1(:),:)**0.5
+G_cov_wt_u2_sw(:,:) = temp(:,:) * sqrt_G_h_star_u1(:,jm1(:))**0.5
+G_cov_wt_u2_se(:,:) = temp(:,:) * sqrt_G_h_star_u1(ip1(:),jm1(:))**0.5
+
+! Calculate interpolated covariant velocities
+u2_cov_u1(:,:) = p25 * ( G_cov_wt_u1_nw(:,:)*u2_cov(im1(:),jp1(:),n4) +    &
+                         G_cov_wt_u1_ne(:,:)*u2_cov(:,jp1(:),n4) +         &
+                         G_cov_wt_u1_sw(:,:)*u2_cov(im1(:),:,n4) +         &
+                         G_cov_wt_u1_se(:,:)*u2_cov(:,:,n4) )
+u1_cov_u2(:,:) = p25 * ( G_cov_wt_u2_nw(:,:)*u1_cov(:,:,n4) +              &
+                         G_cov_wt_u2_ne(:,:)*u1_cov(ip1(:),:,n4) +         &
+                         G_cov_wt_u2_sw(:,:)*u1_cov(:,jm1(:),n4) +         &
+                         G_cov_wt_u2_se(:,:)*u1_cov(ip1(:),jm1(:),n4) )
+
+! Calculate contravariant velocities
+u1_cont(:,:) = G_cont_11_u1(:,:)*u1_cov(:,:,n4) + p25 * (                    &
+   mean_G_cont_12_u1_nw(:,:)*G_cov_wt_u1_nw(:,:)*u2_cov(im1(:),jp1(:),n4) +  &
+   mean_G_cont_12_u1_ne(:,:)*G_cov_wt_u1_ne(:,:)*u2_cov(:,jp1(:),n4) +       &
+   mean_G_cont_12_u1_sw(:,:)*G_cov_wt_u1_sw(:,:)*u2_cov(im1(:),:,n4) +       &
+   mean_G_cont_12_u1_se(:,:)*G_cov_wt_u1_se(:,:)*u2_cov(:,:,n4) )
+u2_cont(:,:) = G_cont_22_u2(:,:)*u2_cov(:,:,n4) + p25 * (                    &
+   mean_G_cont_12_u2_nw(:,:)*G_cov_wt_u2_nw(:,:)*u1_cov(:,:,n4) +            &
+   mean_G_cont_12_u2_ne(:,:)*G_cov_wt_u2_ne(:,:)*u1_cov(ip1(:),:,n4) +       &
+   mean_G_cont_12_u2_sw(:,:)*G_cov_wt_u2_sw(:,:)*u1_cov(:,jm1(:),n4) +       &
+   mean_G_cont_12_u2_se(:,:)*G_cov_wt_u2_se(:,:)*u1_cov(ip1(:),jm1(:),n4) )
+
+
+!
+! Get tendency of prognostic mass variable sqrt_G_h_star
+!
+F_u1(:,:) = u1_cont(:,:)*sqrt_G_h_star_u1(:,:)
+F_u2(:,:) = u2_cont(:,:)*sqrt_G_h_star_u2(:,:)
+sqrt_G_h_star_f(:,:,n3_f) =  - invdx1*(F_u1(ip1(:),:)-F_u1(:,:)) -   &
+                               invdx2*(F_u2(:,jp1(:))-F_u2(:,:))
+
+
+!
+! Get tendencies of prognostic variables u1_cov and u2_cov
+!
+call get_u1covf_u2covf ( u1_cov(:,:,n4),u2_cov(:,:,n4),u1_cont,u2_cont,    &
+                         F_u1,F_u2,h,h_star(:,:),sqrt_G_h_star(:,:,n4),    &
+                         pv,zeta,ke_horiz,                                 &
+                         u1_cov_f(:,:,n3_f),u2_cov_f(:,:,n3_f) )
+
+
+
+
+
+end subroutine update_diagnostics
+
+!======================================================================
+! END OF UPDATE_DIAGNOSTICS
+!======================================================================
+
+
+
+
+!======================================================================
+! BEGINNING OF STEP_DYNAMICS
+!======================================================================
+
+subroutine step_dynamics ( step_count, w1, w2, w3 )
+
+!----------------------------------------------------------------------
+! PURPOSE:
+!   Performs the dynamics time stepping using the Adams-Bashworth 3rd.
+!   order scheme.
+!----------------------------------------------------------------------
+
+implicit none
+
+!-------------------------------------------------------------------
+! INTENT IN 
+!-------------------------------------------------------------------
+integer (kind = int_kind), intent(in) :: step_count
+
+real (kind = dbl_kind), intent(in) :: w1, w2, w3  ! Time stepping
+                                                  ! weights
+
+
+
+
+! Advance prognostic time step indices
+n4 = mod(step_count+1,2) + 1
+n3 = mod(step_count,2) + 1
+
+
+! Step prognostic variables
+u1_cov(:,:,n4) = u1_cov(:,:,n3) + dt *                               &
+               ( w3*u1_cov_f(:,:,n3_f) + w2*u1_cov_f(:,:,n2_f) +     &
+                 w1*u1_cov_f(:,:,n1_f) )
+
+u2_cov(:,:,n4) = u2_cov(:,:,n3) + dt *                               &
+               ( w3*u2_cov_f(:,:,n3_f) + w2*u2_cov_f(:,:,n2_f) +     &
+                 w1*u2_cov_f(:,:,n1_f) )
+
+sqrt_G_h_star(:,:,n4) = sqrt_G_h_star(:,:,n3) + dt *                 &
+    ( w3*sqrt_G_h_star_f(:,:,n3_f) +                                 &
+      w2*sqrt_G_h_star_f(:,:,n2_f) + w1*sqrt_G_h_star_f(:,:,n1_f) )
+
+
+
+! Advance tendency time step indices
+n3_f = mod(step_count+2,3) + 1
+n2_f = mod(step_count+1,3) + 1
+n1_f = mod(step_count,3) + 1
+
+
+end subroutine step_dynamics
+
+!======================================================================
+! END OF STEP_DYNAMICS
+!======================================================================
+
+
+
+
+end module step

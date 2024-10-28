@@ -1,0 +1,2 @@
+#!/bin/csh
+shallow_water_1_lyr_run > dayfile

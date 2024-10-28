@@ -1,0 +1,329 @@
+module initialize
+
+!-----------------------------------------------------------------
+!   This module sets the initial conditions of the model and
+!   and sets the values of the eta levels.
+!-----------------------------------------------------------------
+
+use kinds
+use physical_parameters
+use model_parameters
+use prognostics
+use step
+
+implicit none
+save
+
+
+contains
+
+
+!===================================================================
+! BEGINNING OF INITIALIZE_MODEL
+!===================================================================
+
+subroutine initialize_model(step_count,tau_initial)
+
+implicit none
+
+!-------------------------------------------------------------------
+! INTENT IN 
+!-------------------------------------------------------------------
+integer (kind = int_kind), intent(in) :: step_count
+
+!-------------------------------------------------------------------
+! INTENT INOUT
+!-------------------------------------------------------------------
+real (kind = dbl_kind), intent(inout) :: tau_initial
+
+!-------------------------------------------------------------------
+! LOCAL
+!-------------------------------------------------------------------
+integer :: i, j
+
+logical, parameter :: init_from_ic_prog_file = .false.
+logical, parameter :: init_from_bc_surf_file = .false.
+logical, parameter :: conical_mtn = .false.
+
+real (kind=dbl_kind), parameter ::    &
+     r0 = (pi/9._dbl_kind)*a_rad,   &  ! radius of mountain (cone-shaped TC5 mountain)
+     r0_G = (p5/log(c2)**0.5)*r0,    &  ! radius of Gaussian mountain (matches half-width of TC5 mtn)
+     x_ctr = -p5*pi*a_rad,    &         ! x-coord center of mountain
+     y_ctr = (pi/6._dbl_kind)*a_rad,   &   ! y-coord center of mountain
+     mtn_ht = c0    !  2000._dbl_kind     ! height of mountain (m)
+real (kind=dbl_kind) :: r_test     ! test to see if within perturbation
+
+
+
+call init_prognostics
+
+
+
+
+
+! Initialize prognostic and tendency time step indices
+n4 = mod(step_count+1,2) + 1
+n3 = mod(step_count,2) + 1
+n3_f = mod(step_count+2,3) + 1
+n2_f = mod(step_count+1,3) + 1
+n1_f = mod(step_count,3) + 1
+
+
+
+! Set horizontal grid point "+1/-1" indices
+do i = 1,im
+   ip1(i) = mod(i+im,im) + 1
+   im1(i) = mod(i+im-2,im) + 1
+   ip2(i) = mod(i+im+1,im) + 1
+   im2(i) = mod(i+im-3,im) + 1
+end do
+do j = 1,jm
+   jp1(j) = mod(j+jm,jm) + 1
+   jm1(j) = mod(j+jm-2,jm) + 1
+   jp2(j) = mod(j+jm+1,jm) + 1
+   jm2(j) = mod(j+jm-3,jm) + 1
+end do
+
+
+
+! Initialize coordinate x1-x2 locations
+do i = 1,im
+   x1_u1(i) = (i-1)*dx1 - p5*im*dx1            ! origin at center of domain
+   x1_h(i) = (i-1)*dx1 + p5*dx1 - p5*im*dx1    ! origin at center of domain
+end do
+do j = 1,jm
+   x2_u2(j) = (j-1)*dx2 - p5*jm*dx2            ! origin at center of domain
+   x2_h(j) = (j-1)*dx2 + p5*dx2 - p5*jm*dx2    ! origin at center of domain
+end do
+
+
+
+! Calculate Cartesian-coordinate (x-y) locations
+do j = 1,jm
+   do i = 1,im
+      call coordinate_solve ( x1_h(i),  x2_h(j),  x_h(i,j), y_h(i,j) )  ! mass points
+      call coordinate_solve ( x1_u1(i), x2_h(j),  x_u(i,j), y_u(i,j) )  ! u1 points
+      call coordinate_solve ( x1_h(i),  x2_u2(j), x_v(i,j), y_v(i,j) )  ! u2 points
+      call coordinate_solve ( x1_u1(i), x2_u2(j), x_q(i,j), y_q(i,j) )  ! vorticity points
+   end do
+end do
+
+
+! Now that we have Cartesian-coordinate locations,
+! we can initialize the metric terms
+sqrt_G_h(:,:) = c1 /                                                      &
+   ( c1 - C_fac*D_fac*Cos(inv_a_rad*x_h(:,:)-bet)*Cos(inv_a_rad*y_h(:,:)-alf) )
+inv_sqrt_G_h(:,:) = c1 / sqrt_G_h(:,:)
+inv_sqrt_G_q(:,:) = c1 - C_fac*D_fac*Cos(inv_a_rad*x_q(:,:)-bet)*         &
+                            Cos(inv_a_rad*y_q(:,:)-alf)
+G_cont_11_u1(:,:) = c1 + (C_fac*Cos(inv_a_rad*y_u(:,:)-alf))**2
+G_cont_22_u2(:,:) = c1 + (D_fac*Cos(inv_a_rad*x_v(:,:)-bet))**2
+G_cont_12_u1(:,:) = D_fac*Cos(inv_a_rad*x_u(:,:)-bet) +                   &
+                    C_fac*Cos(inv_a_rad*y_u(:,:)-alf)
+G_cont_12_u2(:,:) = D_fac*Cos(inv_a_rad*x_v(:,:)-bet) +                   &
+                    C_fac*Cos(inv_a_rad*y_v(:,:)-alf)
+
+! Initialize components of the transformation Jacobian
+dx1_dx_u1(:,:) = c1
+dx1_dy_u2(:,:) = C_fac*Cos(inv_a_rad*y_v(:,:)-alf)
+dx2_dx_u1(:,:) = D_fac*Cos(inv_a_rad*x_u(:,:)-bet)
+dx2_dy_u2(:,:) = c1
+dx_dx1_u1(:,:) = c1 / ( c1 - C_fac*D_fac*Cos(inv_a_rad*x_u(:,:)-bet)*     &
+                                Cos(inv_a_rad*y_u(:,:)-alf) )
+dx_dx2_u2(:,:) = - C_fac*Cos(inv_a_rad*y_v(:,:)-alf) / ( c1 -             &
+      C_fac*D_fac*Cos(inv_a_rad*x_v(:,:)-bet)*Cos(inv_a_rad*y_v(:,:)-alf) )
+dy_dx1_u1(:,:) = - D_fac*Cos(inv_a_rad*x_u(:,:)-bet) / ( c1 -             &
+      C_fac*D_fac*Cos(inv_a_rad*x_u(:,:)-bet)*Cos(inv_a_rad*y_u(:,:)-alf) )
+dy_dx2_u2(:,:) = c1 / ( c1 - C_fac*D_fac*Cos(inv_a_rad*x_v(:,:)-bet)*     &
+                                Cos(inv_a_rad*y_v(:,:)-alf) )
+
+! Initialize G_cont_12 weightings for averaging contravariant/covariant velocities
+! Arithmetic mean now used
+mean_G_cont_12_u1_nw(:,:) = p5*(G_cont_12_u1(:,:)+G_cont_12_u2(im1(:),jp1(:)))
+mean_G_cont_12_u1_ne(:,:) = p5*(G_cont_12_u1(:,:)+G_cont_12_u2(:,jp1(:)))
+mean_G_cont_12_u1_sw(:,:) = p5*(G_cont_12_u1(:,:)+G_cont_12_u2(im1(:),:))
+mean_G_cont_12_u1_se(:,:) = p5*(G_cont_12_u1(:,:)+G_cont_12_u2(:,:))
+mean_G_cont_12_u2_nw(:,:) = p5*(G_cont_12_u2(:,:)+G_cont_12_u1(:,:))
+mean_G_cont_12_u2_ne(:,:) = p5*(G_cont_12_u2(:,:)+G_cont_12_u1(ip1(:),:))
+mean_G_cont_12_u2_sw(:,:) = p5*(G_cont_12_u2(:,:)+G_cont_12_u1(:,jm1(:)))
+mean_G_cont_12_u2_se(:,:) = p5*(G_cont_12_u2(:,:)+G_cont_12_u1(ip1(:),jm1(:)))
+
+
+if ( init_from_ic_prog_file ) then
+
+   print *
+   print *, "Initializing prognostic variables from ic_prog file"
+   print *
+
+   open (unit = 20, file = "./data/ic_prog", action = "read", form = "unformatted")
+
+
+   ! Read in initial value of time (tau)
+   read (20) tau_initial
+
+
+   ! Read initial conditions prognostic variables
+   ! do j = 1,jm
+   !    read (20) (u(i,j,n4),  i = 1,im)
+   !    read (20) (v(i,j,n4),  i = 1,im)
+   !    read (20) (h_star(i,j,n4),  i = 1,im)
+   ! end do
+
+   close (20)
+
+else
+
+   print *
+   print *, "Initializing prognostic variables within model"
+   print *
+
+! Mimicking Williamson et al. (1992) test case 5 -- Zonal Flow over an Isolated Mtn.
+
+   tau_initial = c0
+
+   ! Initialize Cartesian velocity components
+   u_init_u1(:,:) = 20._dbl_kind*Cos(inv_a_rad*y_u(:,:))
+   u_init_u2(:,:) = 20._dbl_kind*Cos(inv_a_rad*y_v(:,:))
+   v_init_u1(:,:) = c0
+   v_init_u2(:,:) = c0
+
+   ! Initialize prognostic covariant velocity components
+   u1_cov(:,:,n4) = dx_dx1_u1(:,:)*u_init_u1(:,:) +                  &
+                    dy_dx1_u1(:,:)*v_init_u1(:,:)
+   u2_cov(:,:,n4) = dx_dx2_u2(:,:)*u_init_u2(:,:) +                  &
+                    dy_dx2_u2(:,:)*v_init_u2(:,:)
+
+   h_star(:,:) = 5960._dbl_kind    ! initially h_0
+
+   ! Put mountain in place
+
+   if ( conical_mtn ) then
+
+      do j = 1, jm
+         do i = 1, im
+      
+            r_test = ( (x_h(i,j)-x_ctr)**2 + (y_h(i,j)-y_ctr)**2 ) ** 0.5
+            if ( r_test.le.r0 ) then
+               hs(i,j) = mtn_ht*(c1-r_test/r0)
+               h_star(i,j) = h_star(i,j) - hs(i,j)
+            else
+               hs(i,j) = c0
+            end if
+         
+            ! adjust height for geostrophic balance
+            h_star(i,j) = h_star(i,j) -                                    &
+               invgrav*Omega*a_rad*20._dbl_kind*Sin(inv_a_rad*y_h(i,j))**2
+
+         end do
+      end do
+
+   else   ! Gaussian mountain case
+
+      do j = 1, jm
+         do i = 1, im
+
+            r_test = ( (x_h(i,j)-x_ctr)**2 + (y_h(i,j)-y_ctr)**2 ) ** 0.5
+            if ( r_test.le.(0.375_dbl_kind*pi*a_rad) ) then
+               hs(i,j) = mtn_ht*exp( - (r_test/r0_G)**2 )
+               h_star(i,j) = h_star(i,j) - hs(i,j)
+            else
+               hs(i,j) = c0
+            end if
+         
+            ! adjust height for geostrophic balance
+            h_star(i,j) = h_star(i,j) -                                    &
+               invgrav*Omega*a_rad*20._dbl_kind*Sin(inv_a_rad*y_h(i,j))**2
+
+         end do
+      end do
+
+   end if
+
+
+   sqrt_G_h_star(:,:,n4) = h_star(:,:)*sqrt_G_h(:,:)
+
+end if
+
+
+
+! Initialize Coriolis parameter
+! f_cor(:,:) = 3.24e-04_dbl_kind     ! f-plane
+f_cor(:,:) = c2*Omega*Sin(inv_a_rad*y_q(:,:))
+
+
+end subroutine initialize_model
+
+
+
+subroutine coordinate_solve (x1_in, x2_in, x_out, y_out)
+
+! Subroutine to iteratively solve for Cartesian-coordinate values
+! of model grid points (x1_in,x2_in)
+
+real (kind=dbl_kind), intent(in) ::        &
+          x1_in, x2_in     ! non-orthogonal coordinate grid-point values in
+          
+real (kind=dbl_kind), intent(out) ::       &
+          x_out, y_out     ! Cartesian coordinate grid-point values out
+
+real (kind=dbl_kind) ::                    &
+          error_x1, error_x2, inv_Jac_11, inv_Jac_12, inv_Jac_21, inv_Jac_22
+          
+real (kind=dbl_kind) ::                    &
+          temp, x1_test, x2_test
+
+real (kind=dbl_kind), parameter ::         &
+          conv = 1.E-08_dbl_kind   ! convergence criterion
+
+integer :: iter
+
+integer, parameter :: max_iter = 100
+
+
+iter = 0
+error_x1 = 1.E+10_dbl_kind
+error_x2 = 1.E+10_dbl_kind
+
+! First guess for x_out and y_out
+x_out = x1_in
+y_out = x2_in
+
+do while ( (abs(error_x1).gt.conv).or.(abs(error_x2).gt.conv) )
+
+   temp = c1 / ( c1 - C_fac*D_fac*Cos(x_out*inv_a_rad-bet)*Cos(y_out*inv_a_rad-alf) )
+   inv_Jac_11 = temp
+   inv_Jac_12 = -temp * C_fac*Cos(y_out*inv_a_rad-alf)
+   inv_Jac_21 = -temp * D_fac*Cos(x_out*inv_a_rad-bet)
+   inv_Jac_22 = temp
+
+   x1_test = x_out + a_rad*C_fac*Sin(y_out*inv_a_rad - alf)
+   x2_test = y_out + a_rad*D_fac*Sin(x_out*inv_a_rad - bet)
+
+   error_x1 = x1_test - x1_in
+   error_x2 = x2_test - x2_in
+
+   x_out = x_out - inv_Jac_11*error_x1 - inv_Jac_12*error_x2
+   y_out = y_out - inv_Jac_21*error_x1 - inv_Jac_22*error_x2
+
+   iter = iter + 1
+   
+   if ( iter.gt.max_iter ) then
+      print *
+      print *, "Max iterations reached in coordinate_solve"
+      print *, "iter = ", iter
+      print *, "   Program stopping"
+      print *
+      stop
+   end if
+
+end do
+   
+
+end subroutine coordinate_solve
+
+!===================================================================
+! END OF INITIALIZE_MODEL
+!===================================================================
+
+
+end module initialize

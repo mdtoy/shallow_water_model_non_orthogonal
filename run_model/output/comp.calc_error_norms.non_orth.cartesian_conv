@@ -1,0 +1,3 @@
+#!/bin/csh
+gfortran -fconvert=big-endian -o calc_error_norms.non_orth.cartesian_conv -L/opt/local/lib -I/opt/local/include calc_error_norms.non_orth.cartesian_conv.f90 -lnetcdf -lnetcdff
+
